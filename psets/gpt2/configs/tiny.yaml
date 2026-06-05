@@ -1,0 +1,17 @@
+model:
+  vocab_size: 50257
+  block_size: 128
+  n_layer: 2
+  n_head: 2
+  n_embd: 128
+  dropout: 0.0
+  layer_norm_eps: 0.00001
+train:
+  data_dir: data/processed/climbmix_gpt2_1m
+  batch_size: 4
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  max_steps: 20
+  eval_interval: 10
+  eval_batches: 2
+  seed: 1234
