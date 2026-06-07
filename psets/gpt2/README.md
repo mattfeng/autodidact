@@ -411,13 +411,6 @@ When the tokenizer files are present, these checks should pass:
 - `uv run pytest -q tests/test_tokenizer.py tests/test_no_transformers.py` passes.
 - The no-transformers test scans `src/` and `scripts/` for `import transformers` and `from transformers`; it scans only `src/` for `import tiktoken`, `from tiktoken`, `import tokenizers`, and `from tokenizers`.
 
-Before running tokenizer tests that instantiate `GPT2Tokenizer`, download the vocabulary and merge files:
-
-```bash
-uv run python scripts/download_openai_gpt2.py
-uv run pytest -q tests/test_tokenizer.py tests/test_no_transformers.py
-```
-
 ## Problem 2: Grain Data Loading for Language Modeling
 
 ### Context
@@ -472,7 +465,7 @@ class TokenBlockDataset:
 Pseudocode:
 
 1. Check that `tokens` is one-dimensional and has at least `block_size + 1` elements.
-2. Cast tokens to `np.int32`.
+2. Ensure tokens have dtype `np.int32` without forcing a copy when they are already `int32`.
 3. Compute starts `0, stride, 2 * stride, ...` where `start + block_size + 1 <= len(tokens)`.
 4. For item `index`, slice `x = tokens[start:start + block_size]`.
 5. Slice `y = tokens[start + 1:start + block_size + 1]`.
@@ -495,7 +488,8 @@ def load_tokens(path: str) -> np.ndarray:
         path: Path to a `.npy` file.
 
     Returns:
-        One-dimensional int32 token array.
+        One-dimensional int32 token array. Large `.npy` files should be
+        memory-mapped rather than fully loaded into RAM.
     """
     pass
 
@@ -526,11 +520,26 @@ def make_grain_loader(
 
 Pseudocode:
 
-1. Wrap `TokenBlockDataset` with `grain.MapDataset.source`.
-2. If `shuffle` is true, apply Grain shuffle with the seed.
-3. Batch with `batch_size`, dropping incomplete batches for static shapes.
-4. Return an iterator over dictionaries.
-5. Ensure `input_ids` and `target_ids` are `np.int32`.
+1. Load token files with `np.load(path, mmap_mode="r")` so NumPy returns an `np.memmap` view of the `.npy` file instead of reading the entire array into memory.
+2. Check that the loaded array is one-dimensional and has dtype `np.int32`. The provided dataset builder writes `int32`; if a file has another dtype, raise a clear error instead of silently copying a huge file.
+3. In `TokenBlockDataset.__init__`, keep the token array reference. Do not call `tokens.astype(np.int32)`, because that would materialize a memory-mapped file. `np.asarray(tokens, dtype=np.int32)` is acceptable only after checking the dtype is already `int32`.
+4. Wrap `TokenBlockDataset` with `grain.MapDataset.source`.
+5. If `shuffle` is true, apply Grain shuffle with the seed.
+6. Batch with `batch_size`, dropping incomplete batches for static shapes.
+7. Return an iterator over dictionaries.
+8. Ensure `input_ids` and `target_ids` are `np.int32`.
+
+Example `load_tokens` implementation:
+
+```python
+def load_tokens(path: str) -> np.ndarray:
+    tokens = np.load(path, mmap_mode="r")
+    if tokens.ndim != 1:
+        raise ValueError(f"expected a one-dimensional token array, got shape {tokens.shape}")
+    if tokens.dtype != np.int32:
+        raise TypeError(f"expected int32 tokens, got {tokens.dtype}")
+    return tokens
+```
 
 Correctness checks:
 
