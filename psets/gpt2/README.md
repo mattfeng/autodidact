@@ -193,7 +193,7 @@ The token-position split happens after deterministic cluster-balanced constructi
 
 ## Problem 1: GPT-2 Tokenization
 
-### Context
+### Background
 
 GPT-2 does not read Python strings directly; instead, it reads integer token IDs from a fixed vocabulary. In this problem, you will implement that tokenizer yourself from GPT-2's `vocab.json` and `merges.txt` files.
 
@@ -413,11 +413,29 @@ When the tokenizer files are present, these checks should pass:
 
 ## Problem 2: Grain Data Loading for Language Modeling
 
-### Context
+### Background
 
-JAX computations work best when batches are arrays with static shapes. Grain provides deterministic data loading and transformation pipelines. Your dataset object should convert a one-dimensional token array into many shifted blocks. A training block beginning at index `s` uses input tokens `tokens[s:s+block_size]` and target tokens `tokens[s+1:s+block_size+1]`.
+Problem 1 produced integer token IDs. A language model does not train on whole documents directly; it trains on fixed-length token windows so every batch has the same array shape. This matters for JAX because `jit` compilation specializes to shapes. If the data loader sometimes emits shorter final examples or variable-length documents, later training code becomes harder to compile and reason about.
 
-The shift is the language-model objective. At position `t`, the model sees tokens up to `t` and predicts the token at `t + 1`. The target operation is not learnable and must not be differentiated.
+The processed ClimbMix files are one-dimensional arrays of GPT-2 token IDs. Problem 2 turns each array into many overlapping next-token prediction examples. A training block beginning at token position `s` uses:
+
+- `input_ids = tokens[s:s + block_size]`
+- `target_ids = tokens[s + 1:s + block_size + 1]`
+
+The one-token shift is the language-model objective. At position `t`, the model is given the token prefix through `input_ids[t]` and is trained to predict `target_ids[t]`, the next token in the original stream. This target construction is data preprocessing, not a learnable operation; gradients flow through the model's logits and parameters, not through integer token IDs or the shift itself.
+
+For example, with tokens `[10, 11, 12, 13, 14]` and `block_size = 3`, the first example is:
+
+```text
+input_ids:  [10, 11, 12]
+target_ids: [11, 12, 13]
+```
+
+The `stride` controls how far the start position moves between examples. `stride = 1` creates every possible shifted block and maximizes training examples. A larger stride reduces overlap and produces fewer examples. In either case, a valid block must have `block_size + 1` source tokens available, because the final input token also needs a next-token target.
+
+The token arrays can be large, so `load_tokens` should memory-map `.npy` files instead of eagerly copying them into RAM. Preserve the `int32` dtype written by the dataset builder; silently converting a memory-mapped array can materialize the full file and hide data problems. The dataset should keep a reference to the token array and return small sliced examples on demand.
+
+Grain wraps this indexable dataset into an iterator suitable for training. It provides deterministic shuffling from a seed, batching, and dropping incomplete final batches. Dropping the final partial batch is important because every batch should have static shape `(batch_size, block_size)` for both `input_ids` and `target_ids`.
 
 ### Tasks
 
@@ -568,7 +586,7 @@ uv run pytest -q tests/test_data.py
 
 ## Problem 3: GPT-2 Modules in Equinox
 
-### Context
+### Background
 
 GPT-2 is a stack of pre-layer-norm Transformer blocks. Each block has:
 
@@ -903,7 +921,7 @@ uv run pytest -q tests/test_attention.py tests/test_model_shapes.py
 
 ## Problem 4: Loss, Optimization, and Training
 
-### Context
+### Background
 
 The model returns logits, not probabilities. For target token `y`, cross-entropy is:
 
@@ -1167,7 +1185,7 @@ uv run python -m src.train --config configs/tiny.yaml
 
 ## Problem 5: Load OpenAI GPT-2 Weights Without Transformers
 
-### Context
+### Background
 
 OpenAI GPT-2-small has 12 layers, 12 heads, embedding width 768, context length 1024, and vocabulary size 50,257. HuggingFace hosts converted OpenAI GPT-2 weights in `safetensors` format. You may use `huggingface_hub` or `hf` CLI to download these files, but your model code and weight loader must not import `transformers`.
 
@@ -1365,7 +1383,7 @@ uv run python -m src.check_pretrained --checkpoint-dir checkpoints/openai-gpt2
 
 ## Problem 6: Integration and Training Behavior
 
-### Context
+### Background
 
 A correct model can still fail as a system if data batches are shifted incorrectly, if the loss is computed over the wrong axis, if parameters are accidentally static, or if pretrained weights overwrite the wrong leaves. Integration checks should be small, deterministic, and targeted.
 
