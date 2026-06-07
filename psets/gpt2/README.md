@@ -181,7 +181,7 @@ The builder saves processed NumPy arrays at:
 - `data/processed/climbmix_gpt2_1m/val_tokens.npy`
 - `data/processed/climbmix_gpt2_1m/test_tokens.npy`
 
-Each array has dtype `uint16` or `int32` and shape `(num_tokens,)`. GPT-2 token IDs are integers in `[0, 50256]`, where `50256` is the end-of-text token.
+Each array has dtype `int32` and shape `(num_tokens,)`. GPT-2 token IDs are integers in `[0, 50256]`, where `50256` is the end-of-text token.
 
 Training examples are contiguous language-model blocks:
 

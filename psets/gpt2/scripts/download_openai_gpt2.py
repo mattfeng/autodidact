@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from huggingface_hub import snapshot_download
 
@@ -11,6 +12,11 @@ MODEL_FILES = [
     "vocab.json",
     "merges.txt",
 ]
+
+
+def log(message: str) -> None:
+    """Print a progress message immediately."""
+    print(message, file=sys.stderr, flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,15 +39,24 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    log(
+        "Downloading OpenAI GPT-2 files "
+        f"repo_id={args.repo_id!r} output_dir={str(output_dir)!r}"
+    )
+    log(f"Requested files: {', '.join(MODEL_FILES)}")
     snapshot_download(
         repo_id=args.repo_id,
         local_dir=output_dir,
         allow_patterns=MODEL_FILES,
     )
+    log("Download step finished; verifying required files.")
 
     missing = [name for name in MODEL_FILES if not (output_dir / name).exists()]
     if missing:
         raise FileNotFoundError(f"missing downloaded files: {missing}")
+    for name in MODEL_FILES:
+        path = output_dir / name
+        log(f"Found {path} ({path.stat().st_size:,} bytes)")
 
     manifest = {
         "repo_id": args.repo_id,
@@ -49,6 +64,8 @@ def main() -> None:
     }
     manifest_path = output_dir / "download_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log(f"Wrote manifest to {manifest_path}")
+    log("Finished downloading OpenAI GPT-2 files.")
 
 
 if __name__ == "__main__":
