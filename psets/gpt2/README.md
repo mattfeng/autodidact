@@ -128,17 +128,11 @@ You will edit every file under `src/`. The `pyproject.toml`, `.python-version`, 
 
 ClimbMix is a language-model pretraining dataset introduced with CLIMB, a clustering-based data mixture method. The official NVIDIA dataset is large. For this assignment, use the HuggingFace-hosted text-form mirror `gvlassis/ClimbMix`, which exposes data by `cluster_id` and avoids requiring you to load a terabyte-scale ordered corpus. HuggingFace reports the original ClimbMix as a text-generation dataset derived from the CLIMB paper, and the text-form mirror documents that the original release is inconvenient for small users because cluster ordering and missing precise ratios can make naive subsampling invalid.
 
-Your subset must be a properly constructed subset, meaning:
+The provided scripts construct a small, deterministic, cluster-balanced training subset in two stages.
 
-- it must contain examples from all 20 ClimbMix clusters, with `cluster_id` values `1` through `20`;
-- it must be sampled with a fixed seed;
-- it must not be formed by taking the first rows of the original dataset;
-- it must target a fixed number of tokenized GPT-2 tokens per cluster, not only a fixed number of documents;
-- it must store a manifest containing dataset name, split, seed, tokenizer name, target tokens per cluster, selected row counts, selected token counts, and SHA256 hashes of output files.
+First, `scripts/download_climbmix.py` streams text rows from each of the 20 `gvlassis/ClimbMix` cluster subsets. A row is one text document/sample from the HuggingFace dataset. The script uses a fixed seed and HuggingFace's streaming shuffle buffer before writing JSONL files under `data/raw/climbmix/`, one file per cluster. Each JSONL record contains `text`, `cluster_id`, and `source_row_index`. The default `--max-docs-per-cluster 2000` is sized for the development subset. For larger token targets, increase `--max-docs-per-cluster`.
 
-For development, create a small subset with `50_000` GPT-2 tokens per cluster, about `1_000_000` total tokens. For larger training, increase this to `2_000_000` tokens per cluster.
-
-After you create the provided `scripts/download_climbmix.py`, download raw text rows with:
+Download raw text rows with:
 
 ```bash
 uv run python scripts/download_climbmix.py \
@@ -149,13 +143,25 @@ uv run python scripts/download_climbmix.py \
   --seed 1234
 ```
 
-After you create the provided `scripts/download_openai_gpt2.py`, download the GPT-2 vocabulary, merge, and checkpoint files with:
+Then, `scripts/build_climbmix_subset.py` reads those JSONL files, tokenizes each document with the GPT-2 tokenizer, appends the GPT-2 end-of-text token, and takes a fixed number of token IDs from each cluster. It concatenates the cluster token arrays in a deterministic shuffled cluster order, splits by token position into train/validation/test arrays, and writes a manifest with the dataset name, split, seed, tokenizer name, target tokens per cluster, selected row counts, selected token counts, split sizes, and SHA256 hashes of the output arrays.
+
+This pipeline is intended to avoid common invalid subsets:
+
+- the raw data includes examples from all 20 ClimbMix clusters, with `cluster_id` values `1` through `20`;
+- raw rows are streamed and shuffled with a fixed seed instead of taking an ordered prefix;
+- the final subset targets a fixed number of GPT-2 tokens per cluster, not only a fixed number of documents;
+- train/validation/test splits are made by token position before training blocks are created;
+- generated outputs are recorded in a manifest for reproducibility.
+
+For development, the command below builds a small subset with `50_000` GPT-2 tokens per cluster, about `1_000_000` total tokens. For larger training, increase this to `2_000_000` tokens per cluster.
+
+Download the GPT-2 vocabulary, merge, and checkpoint files with:
 
 ```bash
 uv run python scripts/download_openai_gpt2.py
 ```
 
-After you create the provided `scripts/build_climbmix_subset.py`, build token shards with:
+Build token shards with:
 
 ```bash
 uv run python scripts/build_climbmix_subset.py \
@@ -169,13 +175,13 @@ uv run python scripts/build_climbmix_subset.py \
   --seed 1234
 ```
 
-The processed files must be NumPy arrays saved as:
+The builder saves processed NumPy arrays at:
 
 - `data/processed/climbmix_gpt2_1m/train_tokens.npy`
 - `data/processed/climbmix_gpt2_1m/val_tokens.npy`
 - `data/processed/climbmix_gpt2_1m/test_tokens.npy`
 
-Each array has dtype `uint16` or `int32` and shape `(num_tokens,)`. GPT-2 token IDs must be integers in `[0, 50256]`, where `50256` is the end-of-text token.
+Each array has dtype `uint16` or `int32` and shape `(num_tokens,)`. GPT-2 token IDs are integers in `[0, 50256]`, where `50256` is the end-of-text token.
 
 Training examples are contiguous language-model blocks:
 
@@ -183,7 +189,7 @@ Training examples are contiguous language-model blocks:
 - target `y`: shape `(block_size,)`, dtype `int32`;
 - relation: `y[t] == tokens[start + t + 1]` and `x[t] == tokens[start + t]`.
 
-Use train/validation/test splits by token position after deterministic cluster-balanced construction and before making blocks. Do not split individual examples after blocks are made, because adjacent shifted blocks can leak nearly identical context between splits.
+The token-position split happens after deterministic cluster-balanced construction and before training blocks are made. This avoids splitting adjacent shifted blocks across train/validation/test, which would leak nearly identical context between splits.
 
 ## Problem 1: Configuration, Tokenization, and Dataset Construction
 
