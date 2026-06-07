@@ -7,7 +7,7 @@
 - [Environment](#environment)
 - [Directory Structure](#directory-structure)
 - [Dataset](#dataset)
-- [Problem 1: Configuration, Tokenization, and Dataset Construction](#problem-1-configuration-tokenization-and-dataset-construction)
+- [Problem 1: GPT-2 Tokenization](#problem-1-gpt-2-tokenization)
 - [Problem 2: Grain Data Loading for Language Modeling](#problem-2-grain-data-loading-for-language-modeling)
 - [Problem 3: GPT-2 Modules in Equinox](#problem-3-gpt-2-modules-in-equinox)
 - [Problem 4: Loss, Optimization, and Training](#problem-4-loss-optimization-and-training)
@@ -191,107 +191,47 @@ Training examples are contiguous language-model blocks:
 
 The token-position split happens after deterministic cluster-balanced construction and before training blocks are made. This avoids splitting adjacent shifted blocks across train/validation/test, which would leak nearly identical context between splits.
 
-## Problem 1: Configuration, Tokenization, and Dataset Construction
+## Problem 1: GPT-2 Tokenization
 
 ### Context
 
-Language models train on token IDs, not raw strings. GPT-2 uses byte-pair encoding with a vocabulary of 50,257 tokens. For next-token prediction, a long sequence of token IDs is divided into fixed context windows. The input window is all tokens except the next shifted token, and the target at each position is the next token.
+GPT-2 does not read Python strings directly; instead, it reads integer token IDs from a fixed vocabulary. In this problem, you will implement that tokenizer yourself from GPT-2's `vocab.json` and `merges.txt` files.
 
-A naive ClimbMix subset can be wrong even when it has the right file format. If the source is ordered by cluster or topic, taking the first rows can silently train on a narrow slice. Your subset must explicitly cover all clusters and record how it was created.
+GPT-2 uses a byte-level byte-pair encoding (BPE) tokenizer. It first turns text into UTF-8 bytes, then repeatedly merges frequent adjacent symbol pairs. Because every string can be represented as bytes, GPT-2 does not need an unknown token.
+
+GPT-2's vocabulary has 50,257 entries:
+
+- 256 initial byte symbols;
+- learned BPE merge tokens for the main vocabulary; and
+- the special `<|endoftext|>` token with ID `50256`, used as an end-of-text or document-boundary marker.
+
+The encoding process has four stages:
+
+1. Split the input string into regex pieces ("pretokenization").
+2. Convert each piece to UTF-8 bytes and map every byte to a unique Unicode symbol.
+    - Every byte is mapped to a Unicode symbol to avoid raw whitespace and control characters inside BPE token strings, which would otherwise complicate the code needed to read and serialize files like `vocab.json` and `merges.txt`.
+3. Apply byte-pair encoding merges to each piece until no ranked merge applies.
+4. Look up the final token strings in `vocab.json` to get integer token IDs.
+
+The regex pre-tokenizer controls the boundaries where BPE may merge. GPT-2 usually attaches a leading space to the following word, so `" world"` and `"world"` are different tokenization contexts. This is why GPT-2 tokens often contain the space before a word rather than after the previous word. Before byte encoding, the regex separates contractions, number runs, letter runs, punctuation runs, and whitespace.
+
+The merge file, `merges.txt`, is an ordered list of adjacent symbol pairs learned during tokenizer training. Lower ranks merge first. For each pre-tokenized piece, start from byte-level symbols, repeatedly find the adjacent pair with the lowest rank, merge every non-overlapping occurrence of that pair, and stop when no adjacent pair appears in the ranks table. The final merged strings must be keys in `vocab.json`.
+
+Your implementation should expose two inverse operations:
+
+- `encode(text)` returns `np.int32` token IDs by pre-tokenizing, byte-encoding, applying BPE, and using `vocab.json`.
+- `decode(token_ids)` reverses vocabulary lookup, concatenates token strings, maps GPT-2 byte-level Unicode symbols back to bytes, and decodes UTF-8.
+- `add_eot=True` appends GPT-2's end-of-text token ID, `50256`; this token is a sequence delimiter, not a replacement for unknown text.
 
 ### Tasks
 
-Required files to edit: `src/config.py` and `src/tokenizer.py`.
+Required files to edit: `src/tokenizer.py`.
 
-Instructor-provided files to create unchanged: `.python-version`, `pyproject.toml`, `configs/tiny.yaml`, `configs/gpt2_small.yaml`, `scripts/download_climbmix.py`, `scripts/build_climbmix_subset.py`, `scripts/download_openai_gpt2.py`, `tests/test_tokenizer.py`, and `tests/test_no_transformers.py`.
+Instructor-provided files to create unchanged: `.python-version`, `pyproject.toml`, `scripts/download_openai_gpt2.py`, `tests/test_tokenizer.py`, and `tests/test_no_transformers.py`.
 
-#### 1.a Define typed configuration objects
+#### 1.a Implement GPT-2 byte-level BPE tokenization
 
-Create `src/config.py` and include:
-
-```python
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class GPT2Config:
-    """Configuration for a GPT-2 style decoder-only Transformer.
-
-    Attributes:
-        vocab_size: Number of token IDs, including GPT-2 end-of-text.
-        block_size: Maximum sequence length used by positional embeddings.
-        n_layer: Number of Transformer blocks.
-        n_head: Number of attention heads.
-        n_embd: Residual stream width.
-        dropout: Dropout probability used during training. You may set this to
-            0.0 for deterministic tests.
-        layer_norm_eps: Epsilon used by layer normalization.
-    """
-    vocab_size: int
-    block_size: int
-    n_layer: int
-    n_head: int
-    n_embd: int
-    dropout: float
-    layer_norm_eps: float
-
-
-@dataclass(frozen=True)
-class TrainConfig:
-    """Configuration for optimization and data iteration.
-
-    Attributes:
-        data_dir: Directory containing processed token arrays.
-        batch_size: Number of sequences per update.
-        learning_rate: AdamW learning rate.
-        weight_decay: AdamW decoupled weight decay.
-        max_steps: Number of optimizer updates.
-        eval_interval: Number of steps between validation loss estimates.
-        eval_batches: Number of validation batches per estimate.
-        seed: Integer seed used for model initialization, data order, and sampling.
-    """
-    data_dir: str
-    batch_size: int
-    learning_rate: float
-    weight_decay: float
-    max_steps: int
-    eval_interval: int
-    eval_batches: int
-    seed: int
-
-
-def load_yaml_config(path: str) -> tuple[GPT2Config, TrainConfig]:
-    """Load a YAML config file and return model and training configs.
-
-    Args:
-        path: Path to a YAML file with `model` and `train` sections.
-
-    Returns:
-        A pair `(model_config, train_config)`.
-    """
-    pass
-```
-
-Create `configs/tiny.yaml` from the provided file at [`configs/tiny.yaml`](configs/tiny.yaml). It defines a model small enough for CPU tests.
-
-Create `configs/gpt2_small.yaml` from the provided file at [`configs/gpt2_small.yaml`](configs/gpt2_small.yaml). It defines the GPT-2 124M configuration.
-
-Pseudocode:
-
-1. Read the YAML file as a dictionary.
-2. Extract the `model` section and pass its values to `GPT2Config`.
-3. Extract the `train` section and pass its values to `TrainConfig`.
-4. Return both dataclass instances.
-
-Correctness checks:
-
-- `load_yaml_config("configs/tiny.yaml")[0].n_layer == 2`.
-- `load_yaml_config("configs/gpt2_small.yaml")[0].n_embd == 768`.
-- `n_embd % n_head == 0` must be true for every config.
-
-#### 1.b Inspect GPT-2 byte-level BPE tokenization
-
-Create `src/tokenizer.py` and include:
+Create `src/tokenizer.py`. Start with the imports, regex pattern, helper functions, and tokenizer class below. You will fill in each `pass` without delegating to `transformers`, `tiktoken`, or `tokenizers`.
 
 ```python
 import json
@@ -423,7 +363,7 @@ class GPT2Tokenizer:
         pass
 ```
 
-Pseudocode:
+Use this implementation order:
 
 1. For `bytes_to_unicode`, follow OpenAI GPT-2's reversible byte mapping: keep visible bytes `!` through `~`, `¡` through `¬`, and `®` through `ÿ` as themselves, then map all remaining bytes to Unicode code points starting at `256`.
 2. For `gpt2_pretokenize`, compile `GPT2_PRETOKEN_PATTERN` with the `regex` package and return all matches in order.
@@ -440,7 +380,7 @@ Pseudocode:
 13. For `encode`, pre-tokenize the text, BPE-encode each piece, look up every BPE token string in `self._encoder`, convert IDs to `np.int32`, and append `50256` when `add_eot` is true.
 14. For `decode`, map token IDs to token strings with `self._decoder`, concatenate the token strings, map each Unicode symbol back to its original byte with `self._byte_decoder`, and decode the byte sequence as UTF-8 with `errors="replace"`.
 
-Correctness checks:
+Your implementation should satisfy these local checks:
 
 - `gpt2_pretokenize("Hello, world! 123")` returns `["Hello", ",", " world", "!", " 123"]`.
 - The byte encoder maps `ord("A")` to `"A"` and maps byte `0` to a Unicode string that is not the literal null character.
@@ -449,52 +389,29 @@ Correctness checks:
 - Encoding `"hello"` with `add_eot=True` ends with `50256`.
 - Decoding `encode("The quick brown fox")` contains the same words in the same order.
 
-#### 1.c Download a cluster-covered ClimbMix sample
-
-Create `scripts/download_climbmix.py` from the instructor-provided helper script at [`scripts/download_climbmix.py`](scripts/download_climbmix.py); use it unchanged.
-
-Correctness checks:
-
-- The output directory contains exactly 20 JSONL files.
-- Each file has at least one row.
-- Every row in `cluster_07.jsonl` has `"cluster_id": 7`.
-- Re-running the command with the same seed produces identical SHA256 hashes.
-
-#### 1.d Build token-balanced train, validation, and test arrays
-
-Create `scripts/build_climbmix_subset.py` from the instructor-provided helper script at [`scripts/build_climbmix_subset.py`](scripts/build_climbmix_subset.py); use it unchanged. This script may use `tiktoken` because dataset preprocessing is support code, not student-authored tokenizer code.
-
-Correctness checks:
-
-- The manifest contains all 20 cluster IDs.
-- Every cluster contributes exactly `tokens_per_cluster` tokens after truncation.
-- The train, validation, and test token arrays are one-dimensional.
-- `tokens.max() <= 50256` and `tokens.min() >= 0`.
-- No split is empty.
-
 ### Tests
 
-These are fixed pytest tests. Create them exactly as shown and use them unchanged.
+These are fixed pytest tests. Create them exactly as shown and leave them unchanged.
 
 Create `tests/test_tokenizer.py` from the provided file at [`tests/test_tokenizer.py`](tests/test_tokenizer.py).
 
 Create `tests/test_no_transformers.py` from the provided file at [`tests/test_no_transformers.py`](tests/test_no_transformers.py).
 
-Expected test behavior:
+The tests check the following behavior:
 
 - `tests/test_tokenizer.py::test_gpt2_pretokenize_keeps_leading_spaces` uses the fixed text `"Hello, world! 123"` and expects `["Hello", ",", " world", "!", " 123"]`.
 - `tests/test_tokenizer.py::test_gpt2_byte_encoder_is_reversible_for_all_bytes` expects `bytes_to_unicode()` to return 256 unique string values, with `mapping[ord("A")] == "A"` and `mapping[0] != "\x00"`.
 - `tests/test_tokenizer.py::test_bpe_merge_loop_uses_lowest_rank_pair_first` uses ranks `{("l", "o"): 0, ("lo", "w"): 1}` and expects `bpe_encode_piece("low", ranks) == ("low",)`.
 - `tests/test_tokenizer.py::test_gpt2_tokenizer_round_trip_contains_words` uses the fixed text `"The quick brown fox"` and expects the decoded string to contain the words `The`, `quick`, `brown`, and `fox` in order.
 - `tests/test_tokenizer.py::test_gpt2_tokenizer_eot` uses the fixed text `"hello"` with `add_eot=True` and expects the final token ID to equal `50256`.
-- `tests/test_no_transformers.py::test_source_does_not_import_forbidden_tokenizer_libraries` scans `src/` and `scripts/` for `transformers` imports, and scans `src/` for `tiktoken` or `tokenizers` imports. The provided `scripts/build_climbmix_subset.py` may import `tiktoken`.
+- `tests/test_no_transformers.py::test_source_does_not_import_forbidden_tokenizer_libraries` scans `src/` and `scripts/` for `transformers` imports, and scans `src/` for `tiktoken` or `tokenizers` imports. Instructor-provided support scripts may import `tiktoken`; student-authored `src/` code must not.
 
-Expected behavior:
+When the tokenizer files are present, these checks should pass:
 
 - `uv run pytest -q tests/test_tokenizer.py tests/test_no_transformers.py` passes.
 - The no-transformers test scans `src/` and `scripts/` for `import transformers` and `from transformers`; it scans only `src/` for `import tiktoken`, `from tiktoken`, `import tokenizers`, and `from tokenizers`.
 
-Before running tokenizer tests that instantiate `GPT2Tokenizer`, make sure the vocabulary and merge files exist:
+Before running tokenizer tests that instantiate `GPT2Tokenizer`, download the vocabulary and merge files:
 
 ```bash
 uv run python scripts/download_openai_gpt2.py
@@ -665,11 +582,97 @@ Causal masking sets logits with `k > q` to a very negative value before softmax,
 
 ### Tasks
 
-Required files to edit: `src/model.py`.
+Required files to edit: `src/config.py` and `src/model.py`.
 
-Instructor-provided files to create unchanged: `tests/test_attention.py` and `tests/test_model_shapes.py`.
+Instructor-provided files to create unchanged: `configs/tiny.yaml`, `configs/gpt2_small.yaml`, `tests/test_attention.py`, and `tests/test_model_shapes.py`.
 
-#### 3.a Implement GELU, layer normalization helpers, and causal masks
+#### 3.a Define typed configuration objects
+
+Before constructing the model, define the configuration objects that carry architecture and training hyperparameters through the rest of the pset. `GPT2Config` is used directly by the model constructors in this problem. `TrainConfig` is used in Problem 4 by the optimizer and training loop.
+
+Create `src/config.py` and include:
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GPT2Config:
+    """Configuration for a GPT-2 style decoder-only Transformer.
+
+    Attributes:
+        vocab_size: Number of token IDs, including GPT-2 end-of-text.
+        block_size: Maximum sequence length used by positional embeddings.
+        n_layer: Number of Transformer blocks.
+        n_head: Number of attention heads.
+        n_embd: Residual stream width.
+        dropout: Dropout probability used during training. You may set this to
+            0.0 for deterministic tests.
+        layer_norm_eps: Epsilon used by layer normalization.
+    """
+    vocab_size: int
+    block_size: int
+    n_layer: int
+    n_head: int
+    n_embd: int
+    dropout: float
+    layer_norm_eps: float
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    """Configuration for optimization and data iteration.
+
+    Attributes:
+        data_dir: Directory containing processed token arrays.
+        batch_size: Number of sequences per update.
+        learning_rate: AdamW learning rate.
+        weight_decay: AdamW decoupled weight decay.
+        max_steps: Number of optimizer updates.
+        eval_interval: Number of steps between validation loss estimates.
+        eval_batches: Number of validation batches per estimate.
+        seed: Integer seed used for model initialization, data order, and sampling.
+    """
+    data_dir: str
+    batch_size: int
+    learning_rate: float
+    weight_decay: float
+    max_steps: int
+    eval_interval: int
+    eval_batches: int
+    seed: int
+
+
+def load_yaml_config(path: str) -> tuple[GPT2Config, TrainConfig]:
+    """Load a YAML config file and return model and training configs.
+
+    Args:
+        path: Path to a YAML file with `model` and `train` sections.
+
+    Returns:
+        A pair `(model_config, train_config)`.
+    """
+    pass
+```
+
+Create `configs/tiny.yaml` from the provided file at [`configs/tiny.yaml`](configs/tiny.yaml). It defines a model small enough for CPU tests.
+
+Create `configs/gpt2_small.yaml` from the provided file at [`configs/gpt2_small.yaml`](configs/gpt2_small.yaml). It defines the GPT-2 124M configuration.
+
+Pseudocode:
+
+1. Read the YAML file as a dictionary.
+2. Extract the `model` section and pass its values to `GPT2Config`.
+3. Extract the `train` section and pass its values to `TrainConfig`.
+4. Return both dataclass instances.
+
+Correctness checks:
+
+- `load_yaml_config("configs/tiny.yaml")[0].n_layer == 2`.
+- `load_yaml_config("configs/gpt2_small.yaml")[0].n_embd == 768`.
+- `n_embd % n_head == 0` must be true for every config.
+
+#### 3.b Implement GELU, layer normalization helpers, and causal masks
 
 Create `src/model.py` and include:
 
@@ -718,7 +721,7 @@ Correctness checks:
 - `gelu(0.0)` is exactly or very close to `0.0`.
 - `gelu(1.0)` is between `0.83` and `0.85`.
 
-#### 3.b Implement masked multi-head self-attention
+#### 3.c Implement masked multi-head self-attention
 
 Add to `src/model.py`:
 
@@ -769,7 +772,7 @@ Correctness checks:
 - Changing token `x[future_position]` must not change attention output at any earlier query position when all other tokens are fixed.
 - Attention probabilities for masked future positions must be numerically zero within `atol=1e-6`.
 
-#### 3.c Implement the MLP, block, and full GPT-2 model
+#### 3.d Implement the MLP, block, and full GPT-2 model
 
 Add to `src/model.py`:
 
